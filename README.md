@@ -21,6 +21,7 @@
 - Cập nhật bài chết thành `failed`.
 - Khi bài đã `failed` kiểm tra sống lại, cập nhật thành `published` và xóa detail lỗi cũ.
 - Không tự động đổi trạng thái `sgt.social.group.link`.
+- Có công cụ **Check Group** riêng để tải Pool/Blacklist theo Project và kiểm tra thông tin group.
 
 ## 2. Yêu cầu môi trường
 
@@ -49,17 +50,24 @@ Sub_Check\
 ├── main.py                         # Entry point
 ├── gui\
 │   ├── login_window.py             # Form đăng nhập Odoo
-│   └── dashboard_window.py         # Dashboard và worker check
+│   ├── mode_selection_window.py    # Chọn Check Post hoặc Check Group
+│   ├── dashboard_window.py         # Dashboard Check Post
+│   └── group_check_window.py       # Dashboard Check Group
 ├── services\
 │   ├── odoo_client.py              # XML-RPC Odoo
 │   ├── link_checker.py             # Selenium + LibreWolf
 │   └── credential_store.py         # Lưu credential bảo mật trên Windows
+├── tests\
+│   └── test_librewolf_selection.py  # Test tự động chọn LibreWolf
+├── sgt_gb_submit\                   # Odoo addon liên quan
 ├── requirements.txt                # Python dependencies
 ├── run_app.bat                     # Chạy source
 ├── build_exe.bat                   # Build bản EXE
 ├── build_exe.ps1                   # Logic build PyInstaller
+├── build_installer.ps1              # Build bộ cài Windows
+├── install_payload.ps1              # Cài ứng dụng và tạo shortcut
 ├── dist\GBSubmit\                  # Bản EXE sau khi build
-└── PLAN.md                         # Kế hoạch và kiến trúc ban đầu
+└── dist\GBSubmit-Setup.exe          # Installer sau khi build
 ```
 
 ## 4. Cấu hình LibreWolf
@@ -273,4 +281,113 @@ dist\GBSubmit\
 7. Kiểm tra nút `Check lại timeout`.
 8. Kiểm tra nút `Check lại` ở từng dòng.
 9. Kiểm tra trạng thái và detail trên Odoo.
-10. Chỉ bàn giao cả thư mục `dist\GBSubmit`.
+10. Bàn giao `dist\GBSubmit-Setup.exe` hoặc cả thư mục `dist\GBSubmit`.
+
+## 11. Kiến trúc và luồng xử lý
+
+Ứng dụng gồm hai cửa sổ kiểm tra riêng sau khi đăng nhập Odoo thành công:
+
+- **Check Post Facebook** tải lịch sử bài đăng từ `sgt.social.publish.history`,
+  lọc ngày và chạy Selenium ở worker nền.
+- **Check Group** tải danh sách Project, sau đó tải Pool hoặc Blacklist của
+  Project được chọn từ `sgt.social.group.link`.
+
+Tkinter/ttk dựng giao diện. Thread và queue xử lý tác vụ nền, truyền trạng thái
+và kết quả về giao diện. `OdooClient` giao tiếp với Odoo qua XML-RPC;
+`LibreWolfChecker` điều khiển LibreWolf bằng Selenium. Không chạy Selenium hoặc
+các lời gọi Odoo dài trực tiếp trong luồng giao diện.
+
+Luồng Check Post:
+
+1. Đăng nhập Odoo bằng URL, database, user và password.
+2. Tải lịch sử bài đăng và áp dụng bộ lọc ngày/trạng thái.
+3. Chia danh sách thành batch và kiểm tra bằng profile LibreWolf đã chọn.
+4. Hiển thị tiến độ, trạng thái và lý do trên Dashboard.
+5. Cập nhật trạng thái bài đăng về Odoo theo kết quả hiện tại của checker.
+
+Luồng Check Group:
+
+1. Tải danh sách Project khi mở màn hình Check Group.
+2. Sau khi chọn Project và tab Pool/Blacklist, tải đúng danh sách đó.
+3. Kiểm tra từng group hoặc các dòng trong danh sách bằng LibreWolf.
+4. Cập nhật thông tin scrape theo batch lên Odoo; không ghi đè trường quản lý
+   `status`.
+
+## 12. Check Group
+
+Check Group dùng các model và trường Odoo sau:
+
+| Dữ liệu | Model/trường |
+|---|---|
+| Project | `sgt.social.destination`: `id`, `name` |
+| Group link | `sgt.social.group.link`: `project_id`, `link_type`, `group_url`, `alt_url`, `group_name`, `member_count`, `group_type`, `info_updated_at`, `status` |
+| Phân loại | `link_type = pool` hoặc `link_type = blacklist` |
+
+Các link được sắp xếp theo `create_date desc, id desc`; client giới hạn mỗi lần
+tải còn 200 bản ghi. Loại `new` chưa nằm trong phạm vi hiện tại.
+
+Bảng hiển thị Group URL, Alt URL, Group Name, Members, Type, Information Updated
+On, Status và Check Status. Nút **Tải lại** chỉ tải lại Project/tab đang chọn.
+Nút **Check lại** trên một dòng chỉ chạy check cho group link đó. Khi check,
+tool thử `group_url` trước và dùng `alt_url` làm phương án dự phòng; có thể lấy
+URL thân thiện mới cùng thông tin group từ trang About.
+
+Check Status có thể là `ALIVE`, `PARTIAL`, `DEAD`, `ERROR`, `TIMEOUT` hoặc
+`STOPPED`. Kết quả Check Status hiện được giữ trong giao diện trong phiên làm
+việc; Odoo được cập nhật các trường scrape được hỗ trợ (`alt_url`, `group_name`,
+`member_count`, `group_type`). Trường `status` quản lý trên Odoo được giữ nguyên.
+
+Project và group link được tải bất đồng bộ. Request cũ không được phép ghi đè
+lựa chọn Project/tab mới hơn. Nhiều trình duyệt không dùng đồng thời chung một
+profile vật lý; tool tạo bản sao profile tạm cho worker song song.
+
+## 13. Quyền riêng tư Facebook và diễn giải kết quả
+
+LibreWolf kiểm tra bằng tài khoản đã đăng nhập trong profile người dùng chọn.
+Facebook có thể giới hạn nội dung theo đối tượng của bài hoặc quyền thành viên
+nhóm. Vì vậy, tác giả nhìn thấy bài không đảm bảo tài khoản checker cũng xem được.
+
+Ở Check Post, trạng thái `DEAD` hiện được đồng bộ thành `failed` trên Odoo.
+Checker hiện chưa phân biệt chắc chắn bài đã bị xóa với bài còn tồn tại nhưng
+không xem được bằng tài khoản kiểm tra. Nếu bài vẫn hiển thị cho tác giả, hãy
+xác minh quyền xem của profile LibreWolf trước khi coi kết quả `DEAD` là bằng
+chứng bài đã bị xóa.
+
+## 14. An toàn và xử lý lỗi
+
+- Password Odoo không được ghi vào log hoặc `.env`; credential phiên giữ trong
+  bộ nhớ. Nếu bật ghi nhớ đăng nhập, ứng dụng dùng Windows DPAPI.
+- Không đưa token hoặc credential riêng vào Git.
+- Lỗi XML-RPC, Selenium, profile hoặc timeout phải hiện trong log/trạng thái;
+  không tự coi lỗi kiểm tra là thành công.
+- Nếu cập nhật Odoo thất bại, xem thông báo lỗi trên Dashboard trước khi chạy lại.
+- Khi đóng ứng dụng hoặc cần dừng check, dùng nút **Stop** để yêu cầu worker dừng.
+
+## 15. Kiểm thử tự động
+
+Các testcase nằm trong `tests/test_librewolf_selection.py`, dùng `unittest` và
+không cần Odoo, Facebook, LibreWolf đang mở hoặc màn hình đồ họa.
+
+| Mã | Tình huống | Kết quả mong đợi |
+|---|---|---|
+| LW-01 | Chưa chọn thư mục khi khởi tạo checker | Báo lỗi rõ ràng; không đọc `.env`. |
+| LW-02 | Chọn thư mục cha chứa thư mục phiên bản LibreWolf | Tìm đúng `librewolf.exe` và `Profiles/Default`. |
+| LW-03 | Check Post chạy khi chưa chọn thư mục | Hiện cảnh báo; không chạy worker. |
+| LW-04 | Check Group chạy khi chưa chọn thư mục | Hiện cảnh báo và không cho chạy. |
+| LW-05 | Check Group đã có thư mục | Cho phép chạy mà không hiện cảnh báo. |
+
+Chạy test từ thư mục project:
+
+```powershell
+..\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Kết quả ngày **2026-10-13**: **5/5 testcase đạt** (`Ran 5 tests in 0.032s`, `OK`).
+
+## 16. Hạng mục dự kiến chưa có trong ứng dụng
+
+Thiết kế ban đầu có đề xuất SQLite để lưu lịch sử check/cấu hình, xuất CSV,
+retry đồng bộ Odoo khi mất mạng, và lưu Check Status/chi tiết lỗi của Check Group
+trên Odoo. Các hạng mục này chưa được triển khai trong ứng dụng hiện tại. Kết quả
+Check Status của Check Group chỉ tồn tại trong giao diện trong lúc phiên làm việc
+còn mở.
