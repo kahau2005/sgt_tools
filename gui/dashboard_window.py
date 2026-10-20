@@ -8,6 +8,7 @@ import os
 import queue
 import shutil
 import tempfile
+import time
 from datetime import date, datetime
 from tkinter import filedialog, messagebox, ttk
 
@@ -249,8 +250,8 @@ class DashboardWindow(tk.Toplevel):
         self.stop_button.grid(row=0, column=1, padx=2, pady=4, sticky="w")
         ttk.Button(
             action_panel,
-            text="Check lại timeout",
-            command=self._recheck_timeouts,
+            text="Check lại lỗi / timeout",
+            command=self._recheck_failed,
         ).grid(row=0, column=2, padx=(10, 2), pady=4, sticky="w")
         ttk.Button(
             action_panel,
@@ -410,6 +411,17 @@ class DashboardWindow(tk.Toplevel):
         self.tree.bind("<Motion>", self._update_cursor)
         self.tree.bind("<Button-1>", self._handle_row_action)
         self.tree.bind("<<TreeviewSelect>>", self._selection_changed)
+
+        self.context_menu = tk.Menu(self.tree, tearoff=0)
+        self.context_menu.add_command(
+            label="Check lại dòng đã chọn",
+            command=self._recheck_selected_context,
+        )
+        self.context_menu.add_command(
+            label="Mở link bài viết",
+            command=self._open_selected_post_url,
+        )
+        self.tree.bind("<Button-3>", self._show_context_menu)
 
     def _load_weeks(self):
         self._load_request_id += 1
@@ -668,7 +680,7 @@ class DashboardWindow(tk.Toplevel):
             return
         selected_records = self._selected_records()
         records_to_check = (
-            selected_records if len(selected_records) >= 2 else self._filtered_rows
+            selected_records if selected_records else self._filtered_rows
         )
         self._pending_check = False
         self.status_var.set(
@@ -688,7 +700,7 @@ class DashboardWindow(tk.Toplevel):
 
     def _selection_changed(self, _event=None):
         count = len(self._selected_records())
-        if count >= 2:
+        if count >= 1:
             self.start_check_button.configure(
                 text=f"▶ Recheck {count} dòng đã chọn"
             )
@@ -697,12 +709,7 @@ class DashboardWindow(tk.Toplevel):
             )
         else:
             self.start_check_button.configure(text="▶ Check toàn bộ danh sách")
-            if count == 1:
-                self.status_var.set(
-                    "Đã chọn 1 bài viết; tool sẽ check toàn bộ danh sách hiện tại."
-                )
-            else:
-                self.status_var.set("Chưa chọn nhiều dòng; tool sẽ check toàn bộ danh sách.")
+            self.status_var.set("Chưa chọn dòng; tool sẽ check toàn bộ danh sách.")
 
     def _choose_librewolf_dir(self):
         selected = filedialog.askdirectory(
@@ -724,27 +731,69 @@ class DashboardWindow(tk.Toplevel):
             raise ValueError("Thời gian timeout phải từ 1 đến 300 giây.")
         return value
 
-    def _recheck_timeouts(self):
+    def _recheck_failed(self):
+        if self._check_thread and self._check_thread.is_alive():
+            self.status_var.set("Hãy Stop lần check hiện tại trước.")
+            return
         records = []
         for record in self._filtered_rows:
+            if not record.external_post_url:
+                continue
             result = self._last_results.get(record.id)
             item_id = f"record-{record.id}"
+            check_status = ""
             detail = ""
             if self.tree.exists(item_id):
                 values = self.tree.item(item_id, "values")
-                detail = str(values[8]) if len(values) > 8 else ""
-            if (
-                record.external_post_url
-                and (
-                    (result and result.reason == "TIMEOUT_KHONG_XAC_DINH")
-                    or "TIMEOUT_KHONG_XAC_DINH" in detail
-                )
-            ):
+                check_status = str(values[4]).upper() if len(values) > 4 else ""
+                detail = str(values[8]).upper() if len(values) > 8 else ""
+
+            is_failed = False
+            if result:
+                if result.result.lower() in ("error", "stopped"):
+                    is_failed = True
+                elif "TIMEOUT" in (result.reason or "").upper():
+                    is_failed = True
+            elif check_status in ("ERROR", "TIMEOUT", "STOPPED"):
+                is_failed = True
+            elif "TIMEOUT" in detail or "ERROR" in detail:
+                is_failed = True
+
+            if is_failed:
                 records.append(record)
+
         if not records:
-            self.status_var.set("Không có dòng timeout cần check lại.")
+            self.status_var.set("Không có dòng lỗi hoặc timeout cần check lại.")
             return
         self._launch_check(records, min(8, len(records)), 25)
+
+    _recheck_timeouts = _recheck_failed
+
+    def _show_context_menu(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if item_id and item_id.startswith("record-"):
+            current_selection = self.tree.selection()
+            if item_id not in current_selection:
+                self.tree.selection_set(item_id)
+            try:
+                self.context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.context_menu.grab_release()
+
+    def _recheck_selected_context(self):
+        selected = self._selected_records()
+        if not selected:
+            self.status_var.set("Chưa chọn dòng nào để check lại.")
+            return
+        if self._check_thread and self._check_thread.is_alive():
+            self.status_var.set("Hãy Stop lần check hiện tại trước.")
+            return
+        self._launch_check(selected, min(8, len(selected)), 25)
+
+    def _open_selected_post_url(self):
+        selected = self._selected_records()
+        if selected and selected[0].external_post_url:
+            webbrowser.open(selected[0].external_post_url)
 
     def _recheck_row(self, record):
         if self._check_thread and self._check_thread.is_alive():
@@ -894,12 +943,76 @@ class DashboardWindow(tk.Toplevel):
                         break
 
                     self.after(0, self._set_checking_row, record.id)
+                    result = None
                     try:
                         result = checker.check(
                             record.external_post_url, timeout_seconds
                         )
                     except Exception as exc:
                         result = LinkCheckResult("error", f"CHECK_ERROR: {exc}")
+
+                    # Check for driver crash or lost connection
+                    is_driver_dead = (
+                        result
+                        and result.result == "error"
+                        and any(
+                            err_sig in str(result.reason)
+                            for err_sig in (
+                                "DRIVER_ERROR",
+                                "WebDriverException",
+                                "InvalidSessionIdException",
+                                "NoSuchWindowException",
+                                "MaxRetryError",
+                                "Failed to establish a new connection",
+                                "Connection refused",
+                            )
+                        )
+                    )
+
+                    if is_driver_dead and not self._stop_event.is_set():
+                        self.after(
+                            0,
+                            self._append_log,
+                            f"Trình duyệt gặp sự cố ({result.reason[:60]}...). Đang thử khởi động lại...",
+                        )
+                        try:
+                            checker.stop()
+                            time.sleep(1.0)
+                            checker.start()
+                            self.after(
+                                0,
+                                self._append_log,
+                                "Khởi động lại trình duyệt thành công, thử kiểm tra lại link vừa rồi...",
+                            )
+                            result = checker.check(
+                                record.external_post_url, timeout_seconds
+                            )
+                        except Exception as restart_exc:
+                            self.after(
+                                0,
+                                self._append_log,
+                                f"Không thể khởi động lại trình duyệt: {restart_exc}. Luồng này sẽ dừng lại.",
+                            )
+                            with counter_lock:
+                                counter["checked"] += 1
+                                checked = counter["checked"]
+
+                            with buffer_lock:
+                                batch_buffer.append((record, result))
+                                should_flush = len(batch_buffer) >= batch_size
+
+                            self.after(
+                                0,
+                                self._update_check_row,
+                                record,
+                                result,
+                                checked,
+                                len(records),
+                            )
+                            pending.task_done()
+                            if should_flush:
+                                flush_buffer()
+                            break
 
                     with counter_lock:
                         counter["checked"] += 1
@@ -924,26 +1037,11 @@ class DashboardWindow(tk.Toplevel):
 
             except Exception as exc:
                 worker_errors.append(exc)
-                while True:
-                    try:
-                        record = pending.get_nowait()
-                    except queue.Empty:
-                        break
-                    result = LinkCheckResult("error", f"CHECK_WORKER_ERROR: {exc}")
-                    with counter_lock:
-                        counter["checked"] += 1
-                        checked = counter["checked"]
-                    with buffer_lock:
-                        batch_buffer.append((record, result))
-                    self.after(
-                        0,
-                        self._update_check_row,
-                        record,
-                        result,
-                        checked,
-                        len(records),
-                    )
-                    pending.task_done()
+                self.after(
+                    0,
+                    self._append_log,
+                    f"Luồng kiểm tra gặp sự cố: {exc}",
+                )
             finally:
                 if checker:
                     checker.stop()
@@ -959,6 +1057,34 @@ class DashboardWindow(tk.Toplevel):
             thread.start()
         for thread in threads:
             thread.join()
+
+        # If any records remain in queue because all workers stopped/failed:
+        if not pending.empty() and not self._stop_event.is_set():
+            fallback_reason = (
+                f"CHECK_WORKER_ERROR: {worker_errors[0]}"
+                if worker_errors
+                else "CHECK_WORKER_ERROR: Trình duyệt gặp sự cố"
+            )
+            while not pending.empty():
+                try:
+                    record = pending.get_nowait()
+                except queue.Empty:
+                    break
+                result = LinkCheckResult("error", fallback_reason)
+                with counter_lock:
+                    counter["checked"] += 1
+                    checked = counter["checked"]
+                with buffer_lock:
+                    batch_buffer.append((record, result))
+                self.after(
+                    0,
+                    self._update_check_row,
+                    record,
+                    result,
+                    checked,
+                    len(records),
+                )
+                pending.task_done()
 
         # Flush any remaining items in buffer
         flush_buffer(force=True)

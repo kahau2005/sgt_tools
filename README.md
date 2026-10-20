@@ -148,7 +148,7 @@ Các nhóm điều khiển:
   - `Batch`: số bài xử lý trong một đợt, từ 1 đến 500.
   - `Timeout (giây)`: thời gian chờ mỗi lượt, mặc định 10 giây.
   - `Hiện trình duyệt`: bật để nhìn thấy các cửa sổ LibreWolf.
-- **Thao tác:** Refresh, Stop, Check lại timeout.
+- **Thao tác:** Refresh, Stop, Check lại lỗi / timeout.
 - **Tìm kiếm & lọc trạng thái:** lọc cả trạng thái Odoo và trạng thái check.
 
 ### Quy trình batch
@@ -170,7 +170,7 @@ Với timeout mặc định 10 giây:
 3. Thử tối đa 3 lượt.
 4. Nếu cả 3 lượt timeout, detail hiển thị `TIMEOUT_KHONG_XAC_DINH` và số lần reload.
 
-Có thể chọn `Check lại timeout` hoặc bấm `Check lại` tại cột cuối của từng dòng.
+Có thể chọn `Check lại lỗi / timeout` hoặc bấm `Check lại` tại cột cuối của từng dòng (hoặc chuột phải chọn `Check lại dòng đã chọn`).
 
 Sau khi bài sống được đồng bộ thành công, detail sẽ hiển thị:
 
@@ -278,7 +278,7 @@ dist\GBSubmit\
 4. LibreWolf mở đúng profile Facebook.
 5. Chạy thử với `Trình duyệt = 1`, `Batch = 1`, `Timeout = 10`.
 6. Kiểm tra bài sống, bài chết và bài timeout.
-7. Kiểm tra nút `Check lại timeout`.
+7. Kiểm tra nút `Check lại lỗi / timeout`.
 8. Kiểm tra nút `Check lại` ở từng dòng.
 9. Kiểm tra trạng thái và detail trên Odoo.
 10. Bàn giao `dist\GBSubmit-Setup.exe` hoặc cả thư mục `dist\GBSubmit`.
