@@ -524,36 +524,104 @@ class LibreWolfChecker:
                 let rawShares = '';
 
                 if (isAlive) {
+                    // Find the target article element
+                    let targetArticle = null;
                     for (const root of roots) {
-                        const candidateElements = Array.from(root.querySelectorAll(
-                            'span, div, a, button, [role="button"], [role="toolbar"]'
-                        ));
-                        for (const el of candidateElements) {
-                            const ariaLabel = (el.getAttribute('aria-label') || '').trim();
-                            const text = (el.innerText || '').trim();
-                            const combined = (ariaLabel + ' ' + text).toLowerCase();
+                        const articles = Array.from(root.querySelectorAll('div[role="article"]')).filter(visible);
+                        for (const art of articles) {
+                            const hasTarget = postId && Array.from(art.querySelectorAll('a[href]'))
+                                .some((link) => String(link.href || '').toLowerCase().includes(postId));
+                            if (hasTarget) {
+                                targetArticle = art;
+                                break;
+                            }
+                        }
+                        if (targetArticle) break;
+                        if (articles.length === 1) {
+                            targetArticle = articles[0];
+                            break;
+                        }
+                    }
+                    if (!targetArticle && roots.length) {
+                        targetArticle = roots[0];
+                    }
 
-                            if (!rawComments) {
-                                const m = combined.match(/([\\d.,]+(?:\\s*[km])?)\\s*(?:bình luận|câu trả lời|comments?|replies)/i);
-                                if (m) rawComments = m[1];
-                            }
-                            if (!rawShares) {
-                                const m = combined.match(/([\\d.,]+(?:\\s*[km])?)\\s*(?:lượt chia sẻ|chia sẻ|shares?)/i);
-                                if (m) rawShares = m[1];
-                            }
-                            if (!rawInteractions) {
-                                const m = combined.match(/([\\d.,]+(?:\\s*[km])?)\\s*(?:người khác|người|lượt thích|cảm xúc|reactions?|likes?)/i);
-                                if (m) {
-                                    rawInteractions = m[1];
-                                } else if (
-                                    (combined.includes('cảm xúc') || combined.includes('reaction') || combined.includes('thích') || combined.includes('like')) &&
-                                    /^[\\d.,]+\\s*[km]?$/i.test(text)
-                                ) {
+                    if (targetArticle) {
+                        // 1. Reactions: only look at reaction elements / buttons (never read post body text!)
+                        const allButtons = Array.from(targetArticle.querySelectorAll('[role="button"], button, [role="toolbar"]'));
+                        for (const el of allButtons) {
+                            const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
+                            const text = (el.innerText || '').trim();
+
+                            const isReactionContainer = label.includes('bày tỏ cảm xúc') ||
+                                                         label.includes('reacted to this') ||
+                                                         label.includes('ai đã thích') ||
+                                                         label.includes('cảm xúc') ||
+                                                         label.includes('reactions') ||
+                                                         label.includes('lượt thích') ||
+                                                         label.includes('người khác');
+
+                            if (isReactionContainer) {
+                                // If innerText is purely digits or digits + K/M (e.g. "3", "15", "1.2K")
+                                if (/^[\d.,]+\s*[km]?$/i.test(text)) {
                                     rawInteractions = text;
+                                    break;
+                                }
+                                // Check label for "X người khác"
+                                const mOthers = label.match(/([\d.,]+(?:\s*[km])?)\s*người khác/i);
+                                if (mOthers) {
+                                    const baseVal = parseFloat(mOthers[1].replace(',', '.'));
+                                    const hasAnd = label.includes(' và ') || label.includes(' and ');
+                                    const commaCount = (label.match(/,/g) || []).length;
+                                    const namedUsers = commaCount + (hasAnd ? 1 : 0);
+                                    rawInteractions = String(namedUsers + baseVal);
+                                    break;
+                                }
+                                // Check label for direct count like "15 cảm xúc" or "15 reactions"
+                                const mCount = label.match(/([\d.,]+(?:\s*[km])?)\s*(?:cảm xúc|reactions?|lượt thích|likes?)/i);
+                                if (mCount) {
+                                    rawInteractions = mCount[1];
+                                    break;
                                 }
                             }
                         }
-                        if (rawInteractions || rawComments || rawShares) break;
+
+                        // Check reaction icons container if button aria-label wasn't present
+                        if (!rawInteractions) {
+                            const reactionIcons = targetArticle.querySelectorAll('img[src*="reaction"], [aria-label="Thích"], [aria-label="Like"], [aria-label="Yêu thích"], [aria-label="Love"]');
+                            for (const icon of reactionIcons) {
+                                const container = icon.closest('[role="button"]') || icon.parentElement;
+                                if (container && container !== targetArticle) {
+                                    const cText = (container.innerText || '').trim();
+                                    if (/^[\d.,]+\s*[km]?$/i.test(cText)) {
+                                        rawInteractions = cText;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Comments and Shares: must strictly match standalone count format
+                        const textElements = Array.from(targetArticle.querySelectorAll('span, div[role="button"], a[role="link"], button'));
+                        for (const el of textElements) {
+                            const text = (el.innerText || '').trim();
+                            const label = (el.getAttribute('aria-label') || '').trim();
+                            const candidate = text || label;
+
+                            if (!rawComments) {
+                                const mComm = candidate.match(/^([\d.,]+(?:\s*[km])?)\s*(?:bình luận|câu trả lời|comments?|replies)$/i);
+                                if (mComm) {
+                                    rawComments = mComm[1];
+                                }
+                            }
+                            if (!rawShares) {
+                                const mShare = candidate.match(/^([\d.,]+(?:\s*[km])?)\s*(?:lượt chia sẻ|chia sẻ|shares?)$/i);
+                                if (mShare) {
+                                    rawShares = mShare[1];
+                                }
+                            }
+                            if (rawComments && rawShares) break;
+                        }
                     }
                 }
 
