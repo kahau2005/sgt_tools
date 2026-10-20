@@ -2,21 +2,26 @@ $ErrorActionPreference = "Stop"
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appDir = Join-Path $projectDir "dist\GBSubmit"
+if (-not (Test-Path -LiteralPath (Join-Path $appDir "GBSubmit.exe") -PathType Leaf)) {
+    $parentAppDir = Join-Path (Split-Path -Parent $projectDir) "dist\GBSubmit"
+    if (Test-Path -LiteralPath (Join-Path $parentAppDir "GBSubmit.exe") -PathType Leaf) {
+        $appDir = $parentAppDir
+    } else {
+        throw "Hay build GBSubmit.exe truoc khi tao installer."
+    }
+}
 $stageDir = Join-Path $projectDir "build\installer-stage"
 $payloadPath = Join-Path $stageDir "payload.zip"
 $installScript = Join-Path $stageDir "install_payload.ps1"
 $sedPath = Join-Path $stageDir "GBSubmit-Setup.sed"
 $installerPath = Join-Path $projectDir "dist\GBSubmit-Setup.exe"
 $iexpress = Join-Path $env:WINDIR "System32\iexpress.exe"
-
-if (-not (Test-Path -LiteralPath (Join-Path $appDir "GBSubmit.exe") -PathType Leaf)) {
-    throw "Hay build GBSubmit.exe truoc khi tao installer."
-}
 if (-not (Test-Path -LiteralPath $iexpress -PathType Leaf)) {
     throw "Khong tim thay IExpress: $iexpress"
 }
 
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $installerPath) -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectDir "install_payload.ps1") `
     -Destination $installScript -Force
 Compress-Archive -Path (Join-Path $appDir "*") `
@@ -77,3 +82,10 @@ if ($builtInstaller.Length -lt 1MB) {
 
 Write-Host "Installer build thanh cong: $($builtInstaller.FullName)"
 Write-Host "Dung luong: $([math]::Round($builtInstaller.Length / 1MB, 1)) MB"
+
+$parentDistInstaller = Join-Path (Split-Path -Parent $projectDir) "dist\GBSubmit-Setup.exe"
+if ($parentDistInstaller -ne $installerPath) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $parentDistInstaller) -Force | Out-Null
+    Copy-Item -LiteralPath $installerPath -Destination $parentDistInstaller -Force
+    Write-Host "Da copy them installer den: $parentDistInstaller"
+}

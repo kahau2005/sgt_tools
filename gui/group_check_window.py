@@ -611,121 +611,135 @@ class GroupCheckWindow(tk.Toplevel):
         self._check_thread.start()
 
     def _check_worker(self, links, browser_count, batch_size, show_browser):
-        checked = 0
         worker_error = None
-        for batch_start in range(0, len(links), batch_size):
-            batch = links[batch_start:batch_start + batch_size]
-            pending = queue.Queue()
-            for link in batch:
-                pending.put(link)
-            results = []
-            results_lock = threading.Lock()
-            progress_lock = threading.Lock()
-            progress = {"checked": 0}
+        pending = queue.Queue()
+        for link in links:
+            pending.put(link)
 
-            def worker():
-                checker = None
-                profile_dir = None
-                try:
+        results_buffer = []
+        buffer_lock = threading.Lock()
+        progress_lock = threading.Lock()
+        progress = {"checked": 0}
+        batch_counter = {"count": 0}
+
+        def flush_buffer(force=False):
+            items_to_flush = []
+            with buffer_lock:
+                if (force and results_buffer) or len(results_buffer) >= batch_size:
+                    items_to_flush = list(results_buffer)
+                    results_buffer.clear()
+            if not items_to_flush:
+                return
+            updates = [self._group_update_payload(link, result) for link, result in items_to_flush]
+            if not updates:
+                return
+            try:
+                batch_counter["count"] += 1
+                batch_no = batch_counter["count"]
+                self.after(
+                    0,
+                    self._append_log,
+                    f"Đang đồng bộ batch {batch_no} ({len(updates)} group) lên Odoo...",
+                )
+                sync_started = time.perf_counter()
+                updated_ids = self.client.batch_update_group_links(updates)
+                sync_elapsed = time.perf_counter() - sync_started
+                self.after(
+                    0,
+                    self._append_log,
+                    f"Đã gửi batch {batch_no} ({len(updates)} group) lên Odoo trong {sync_elapsed:.2f} giây.",
+                )
+                if len(updated_ids) != len(updates):
+                    self.after(
+                        0,
+                        self._append_log,
+                        f"Odoo chỉ cập nhật được {len(updated_ids)}/{len(updates)} group trong batch này.",
+                    )
+                else:
+                    self.after(
+                        0,
+                        self._append_log,
+                        f"Đồng bộ batch {batch_no} hoàn tất.",
+                    )
+            except Exception as exc:
+                nonlocal worker_error
+                worker_error = exc
+                self.after(0, self._append_log, f"Lỗi cập nhật Odoo: {exc}")
+
+        def worker():
+            checker = None
+            profile_dir = None
+            try:
+                checker = LibreWolfChecker(
+                    self._stop_event,
+                    headless=not show_browser,
+                    librewolf_dir=self._librewolf_dir or None,
+                )
+                if browser_count > 1:
+                    profile_dir = tempfile.mkdtemp(prefix="gbsubmit-group-profile-")
+                    shutil.copytree(
+                        checker.profile, profile_dir, dirs_exist_ok=True
+                    )
                     checker = LibreWolfChecker(
                         self._stop_event,
+                        profile_path=profile_dir,
                         headless=not show_browser,
                         librewolf_dir=self._librewolf_dir or None,
                     )
-                    if browser_count > 1:
-                        profile_dir = tempfile.mkdtemp(prefix="gbsubmit-group-profile-")
-                        shutil.copytree(
-                            checker.profile, profile_dir, dirs_exist_ok=True
-                        )
-                        checker = LibreWolfChecker(
-                            self._stop_event,
-                            profile_path=profile_dir,
-                            headless=not show_browser,
-                            librewolf_dir=self._librewolf_dir or None,
-                        )
-                    checker.start()
-                    while not pending.empty():
-                        try:
-                            link = pending.get_nowait()
-                        except queue.Empty:
-                            break
-                        self.after(0, self._set_group_checking, link.id)
-                        result = checker.check_group(
-                            link.group_url,
-                            link.alt_url,
-                        )
-                        with results_lock:
-                            results.append((link, result))
-                        with progress_lock:
-                            progress["checked"] += 1
-                            checked_number = progress["checked"]
-                        self.after(
-                            0,
-                            self._update_group_row,
-                            link,
-                            result,
-                            checked_number + batch_start,
-                            len(links),
-                        )
-                        pending.task_done()
-                except Exception as exc:
-                    nonlocal worker_error
-                    worker_error = exc
-                finally:
-                    if checker:
-                        checker.stop()
-                    if profile_dir:
-                        shutil.rmtree(profile_dir, ignore_errors=True)
+                checker.start()
+                while not self._stop_event.is_set():
+                    try:
+                        link = pending.get_nowait()
+                    except queue.Empty:
+                        break
+                    self.after(0, self._set_group_checking, link.id)
+                    result = checker.check_group(
+                        link.group_url,
+                        link.alt_url,
+                    )
+                    with progress_lock:
+                        progress["checked"] += 1
+                        checked_number = progress["checked"]
+                    with buffer_lock:
+                        results_buffer.append((link, result))
+                        should_flush = len(results_buffer) >= batch_size
 
-            threads = [
-                threading.Thread(target=worker, daemon=True)
-                for _ in range(min(browser_count, len(batch)))
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            updates = []
-            for link, result in results:
-                updates.append(self._group_update_payload(link, result))
-            checked += len(results)
-            if updates:
-                try:
                     self.after(
                         0,
-                        self._append_log,
-                        f"Đang đồng bộ batch {batch_start // batch_size + 1} "
-                        f"({len(updates)} group) lên Odoo...",
+                        self._update_group_row,
+                        link,
+                        result,
+                        checked_number,
+                        len(links),
                     )
-                    sync_started = time.perf_counter()
-                    updated_ids = self.client.batch_update_group_links(updates)
-                    sync_elapsed = time.perf_counter() - sync_started
-                    self.after(
-                        0,
-                        self._append_log,
-                        f"Đã gửi batch {batch_start // batch_size + 1} "
-                        f"({len(updates)} group) lên Odoo trong "
-                        f"{sync_elapsed:.2f} giây.",
-                    )
-                    if len(updated_ids) != len(updates):
-                        self.after(
-                            0,
-                            self._append_log,
-                            f"Odoo chỉ cập nhật được {len(updated_ids)}/{len(updates)} "
-                            f"group trong batch này.",
-                        )
-                    else:
-                        self.after(
-                            0,
-                            self._append_log,
-                            f"Đồng bộ batch {batch_start // batch_size + 1} hoàn tất.",
-                        )
-                except Exception as exc:
-                    worker_error = exc
-                    self.after(0, self._append_log, f"Lỗi cập nhật Odoo: {exc}")
-            if self._stop_event.is_set():
-                break
-        self.after(0, self._check_finished, checked, len(links), worker_error)
+                    pending.task_done()
+
+                    if should_flush:
+                        flush_buffer()
+
+            except Exception as exc:
+                nonlocal worker_error
+                worker_error = exc
+            finally:
+                if checker:
+                    checker.stop()
+                if profile_dir:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+
+        effective_browser_count = min(browser_count, len(links))
+        threads = [
+            threading.Thread(target=worker, daemon=True)
+            for _ in range(effective_browser_count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        # Flush any remaining results in buffer
+        flush_buffer(force=True)
+
+        self.after(0, self._check_finished, progress["checked"], len(links), worker_error)
 
     @staticmethod
     def _group_update_payload(link, result):

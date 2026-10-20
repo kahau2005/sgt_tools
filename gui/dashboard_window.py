@@ -355,6 +355,9 @@ class DashboardWindow(tk.Toplevel):
             "post_url",
             "odoo_status",
             "check_status",
+            "interactions",
+            "comments",
+            "shares",
             "detail",
             "last_checked",
             "action",
@@ -371,18 +374,24 @@ class DashboardWindow(tk.Toplevel):
         self.tree.heading("post_url", text="POST URL")
         self.tree.heading("odoo_status", text="ODOO STATUS")
         self.tree.heading("check_status", text="CHECK STATUS")
+        self.tree.heading("interactions", text="INTERACTIONS")
+        self.tree.heading("comments", text="COMMENTS")
+        self.tree.heading("shares", text="SHARES")
         self.tree.heading("detail", text="DETAIL")
         self.tree.heading("last_checked", text="LAST CHECKED")
         self.tree.heading("action", text="ACTION")
         self.tree.column("#0", width=170, stretch=False)
         self.tree.column("id", width=55, stretch=False)
-        self.tree.column("posted_at", width=150, stretch=False)
-        self.tree.column("post_url", width=430)
-        self.tree.column("odoo_status", width=110, stretch=False)
-        self.tree.column("check_status", width=110, stretch=False)
-        self.tree.column("detail", width=250)
+        self.tree.column("posted_at", width=140, stretch=False)
+        self.tree.column("post_url", width=380)
+        self.tree.column("odoo_status", width=105, stretch=False)
+        self.tree.column("check_status", width=105, stretch=False)
+        self.tree.column("interactions", width=95, stretch=False, anchor="center")
+        self.tree.column("comments", width=85, stretch=False, anchor="center")
+        self.tree.column("shares", width=75, stretch=False, anchor="center")
+        self.tree.column("detail", width=230)
         self.tree.column("last_checked", width=130, stretch=False)
-        self.tree.column("action", width=90, stretch=False)
+        self.tree.column("action", width=85, stretch=False)
         self.tree.tag_configure("group", background="#f1edf5", foreground=PURPLE_DARK)
         self.tree.tag_configure("published", foreground="#176b36")
         self.tree.tag_configure("alive", foreground="#176b36")
@@ -530,7 +539,7 @@ class DashboardWindow(tk.Toplevel):
     def _update_cursor(self, event):
         if (
             self.tree.identify_region(event.x, event.y) == "cell"
-            and self.tree.identify_column(event.x) in {"#3", "#8"}
+            and self.tree.identify_column(event.x) in {"#3", "#11"}
         ):
             self.tree.configure(cursor="hand2")
         else:
@@ -608,7 +617,7 @@ class DashboardWindow(tk.Toplevel):
                 "",
                 "end",
                 text=f"▼  {user_name}  ({len(user_rows)})",
-                values=("", "", "", "", "", "", "", ""),
+                values=("", "", "", "", "", "", "", "", "", "", ""),
                 tags=("group",),
                 open=True,
             )
@@ -641,6 +650,9 @@ class DashboardWindow(tk.Toplevel):
                         row.external_post_url,
                         row.status.upper(),
                         initial_check_status,
+                        row.interaction_count,
+                        row.comment_count,
+                        row.share_count,
                         initial_detail,
                         initial_last_checked,
                         "Check lại" if row.external_post_url else "",
@@ -720,7 +732,7 @@ class DashboardWindow(tk.Toplevel):
             detail = ""
             if self.tree.exists(item_id):
                 values = self.tree.item(item_id, "values")
-                detail = str(values[5]) if len(values) > 5 else ""
+                detail = str(values[8]) if len(values) > 8 else ""
             if (
                 record.external_post_url
                 and (
@@ -743,7 +755,7 @@ class DashboardWindow(tk.Toplevel):
     def _handle_row_action(self, event):
         if self.tree.identify_region(event.x, event.y) != "cell":
             return
-        if self.tree.identify_column(event.x) != "#8":
+        if self.tree.identify_column(event.x) != "#11":
             return
         item_id = self.tree.identify_row(event.y)
         if item_id and item_id.startswith("record-"):
@@ -836,108 +848,121 @@ class DashboardWindow(tk.Toplevel):
         counter = {"checked": 0}
         counter_lock = threading.Lock()
         worker_errors = []
+        batch_buffer = []
+        buffer_lock = threading.Lock()
+        pending = queue.Queue()
+        for record in records:
+            pending.put(record)
 
-        for batch_start in range(0, len(records), batch_size):
-            batch_records = records[batch_start:batch_start + batch_size]
-            pending = queue.Queue()
-            for record in batch_records:
-                pending.put(record)
-            batch_results = []
-            batch_lock = threading.Lock()
+        def flush_buffer(force=False):
+            items_to_flush = []
+            with buffer_lock:
+                if (force and batch_buffer) or len(batch_buffer) >= batch_size:
+                    items_to_flush = list(batch_buffer)
+                    batch_buffer.clear()
+            if items_to_flush:
+                self._flush_odoo_batch(items_to_flush)
+                self.after(
+                    0,
+                    self._append_log,
+                    f"Đã đồng bộ Odoo batch: {len(items_to_flush)} bài viết.",
+                )
 
-            def worker():
-                checker = None
-                profile_dir = None
-                try:
+        def worker():
+            checker = None
+            profile_dir = None
+            try:
+                checker = LibreWolfChecker(
+                    self._stop_event,
+                    headless=not show_browser,
+                    librewolf_dir=librewolf_dir,
+                )
+                if browser_count > 1:
+                    profile_dir = tempfile.mkdtemp(prefix="gbsubmit-profile-")
+                    shutil.copytree(checker.profile, profile_dir, dirs_exist_ok=True)
                     checker = LibreWolfChecker(
                         self._stop_event,
+                        profile_path=profile_dir,
                         headless=not show_browser,
                         librewolf_dir=librewolf_dir,
                     )
-                    if browser_count > 1:
-                        profile_dir = tempfile.mkdtemp(prefix="gbsubmit-profile-")
-                        shutil.copytree(checker.profile, profile_dir, dirs_exist_ok=True)
-                        checker = LibreWolfChecker(
-                            self._stop_event,
-                            profile_path=profile_dir,
-                            headless=not show_browser,
-                            librewolf_dir=librewolf_dir,
-                        )
-                    checker.start()
-                    while True:
-                        try:
-                            record = pending.get_nowait()
-                        except queue.Empty:
-                            break
-                        if self._stop_event.is_set():
-                            result = LinkCheckResult("stopped", "STOPPED_BY_USER")
-                        else:
-                            self.after(0, self._set_checking_row, record.id)
-                            try:
-                                result = checker.check(
-                                    record.external_post_url, timeout_seconds
-                                )
-                            except Exception as exc:
-                                result = LinkCheckResult("error", f"CHECK_ERROR: {exc}")
-                        with counter_lock:
-                            counter["checked"] += 1
-                            checked = counter["checked"]
-                        with batch_lock:
-                            batch_results.append((record, result))
-                        self.after(
-                            0,
-                            self._update_check_row,
-                            record,
-                            result,
-                            checked,
-                            len(records),
-                        )
-                        pending.task_done()
-                except Exception as exc:
-                    worker_errors.append(exc)
-                    while True:
-                        try:
-                            record = pending.get_nowait()
-                        except queue.Empty:
-                            break
-                        result = LinkCheckResult("error", f"CHECK_WORKER_ERROR: {exc}")
-                        with counter_lock:
-                            counter["checked"] += 1
-                            checked = counter["checked"]
-                        with batch_lock:
-                            batch_results.append((record, result))
-                        self.after(
-                            0,
-                            self._update_check_row,
-                            record,
-                            result,
-                            checked,
-                            len(records),
-                        )
-                        pending.task_done()
-                finally:
-                    if checker:
-                        checker.stop()
-                    if profile_dir:
-                        shutil.rmtree(profile_dir, ignore_errors=True)
+                checker.start()
+                while not self._stop_event.is_set():
+                    try:
+                        record = pending.get_nowait()
+                    except queue.Empty:
+                        break
 
-            threads = [
-                threading.Thread(target=worker, daemon=True)
-                for _ in range(min(browser_count, len(batch_records)))
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            self._flush_odoo_batch(batch_results)
-            self.after(
-                0,
-                self._append_log,
-                f"Đã xử lý batch {batch_start // batch_size + 1}: "
-                f"{len(batch_results)} bài viết.",
-            )
-            if self._stop_event.is_set():
-                break
+                    self.after(0, self._set_checking_row, record.id)
+                    try:
+                        result = checker.check(
+                            record.external_post_url, timeout_seconds
+                        )
+                    except Exception as exc:
+                        result = LinkCheckResult("error", f"CHECK_ERROR: {exc}")
+
+                    with counter_lock:
+                        counter["checked"] += 1
+                        checked = counter["checked"]
+
+                    with buffer_lock:
+                        batch_buffer.append((record, result))
+                        should_flush = len(batch_buffer) >= batch_size
+
+                    self.after(
+                        0,
+                        self._update_check_row,
+                        record,
+                        result,
+                        checked,
+                        len(records),
+                    )
+                    pending.task_done()
+
+                    if should_flush:
+                        flush_buffer()
+
+            except Exception as exc:
+                worker_errors.append(exc)
+                while True:
+                    try:
+                        record = pending.get_nowait()
+                    except queue.Empty:
+                        break
+                    result = LinkCheckResult("error", f"CHECK_WORKER_ERROR: {exc}")
+                    with counter_lock:
+                        counter["checked"] += 1
+                        checked = counter["checked"]
+                    with buffer_lock:
+                        batch_buffer.append((record, result))
+                    self.after(
+                        0,
+                        self._update_check_row,
+                        record,
+                        result,
+                        checked,
+                        len(records),
+                    )
+                    pending.task_done()
+            finally:
+                if checker:
+                    checker.stop()
+                if profile_dir:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+
+        effective_browser_count = min(browser_count, len(records))
+        threads = [
+            threading.Thread(target=worker, daemon=True)
+            for _ in range(effective_browser_count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        # Flush any remaining items in buffer
+        flush_buffer(force=True)
+
         self.after(
             0,
             self._check_finished,
@@ -947,15 +972,26 @@ class DashboardWindow(tk.Toplevel):
         )
 
     def _flush_odoo_batch(self, updates):
-        update_values = []
+        if not updates:
+            return
+        payload = []
         for record, result in updates:
             if result.result == "dead":
-                update_values.append((record.id, "failed", result.reason))
+                payload.append({
+                    "id": record.id,
+                    "status": "failed",
+                    "detail": result.reason,
+                })
             elif result.result == "alive":
-                update_values.append(
-                    (record.id, "published", "OK")
-                )
-        if not update_values:
+                payload.append({
+                    "id": record.id,
+                    "status": "published",
+                    "detail": "OK",
+                    "interaction_count": result.interactions,
+                    "comment_count": result.comments,
+                    "share_count": result.shares,
+                })
+        if not payload:
             for record, result in updates:
                 if result.result == "alive":
                     self.after(
@@ -966,9 +1002,7 @@ class DashboardWindow(tk.Toplevel):
                     )
             return
         try:
-            self.client.batch_update_publish_history_status(
-                update_values
-            )
+            self.client.batch_update_publish_history_full(payload)
             for record, result in updates:
                 if result.result not in {"dead", "alive"}:
                     continue
@@ -995,7 +1029,7 @@ class DashboardWindow(tk.Toplevel):
         item_id = f"record-{record_id}"
         if self.tree.exists(item_id):
             values = list(self.tree.item(item_id, "values"))
-            values[5] = detail
+            values[8] = detail
             self.tree.item(item_id, values=values)
 
     def _update_check_row(self, record, result, checked, total):
@@ -1005,19 +1039,23 @@ class DashboardWindow(tk.Toplevel):
         checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         values = list(self.tree.item(item_id, "values"))
         values[4] = result.result.upper()
-        values[5] = (
+        values[5] = result.interactions
+        values[6] = result.comments
+        values[7] = result.shares
+        values[8] = (
             f"{result.reason} | Đã reload {result.reload_count} lần"
             if result.reload_count
             else result.reason
         )
-        values[6] = checked_at
-        values[7] = "Check lại"
+        values[9] = checked_at
+        values[10] = "Check lại"
         self._last_results[record.id] = result
         self.tree.item(item_id, values=values, tags=(result.result,))
         self.activity_var.set(f"Đang check {checked}/{total} bài viết...")
         self._append_log(
             f"[{checked}/{total}] ID {record.id}: "
-            f"{result.result.upper()} - {result.reason}"
+            f"{result.result.upper()} - {result.reason} "
+            f"(Likes: {result.interactions}, Comments: {result.comments}, Shares: {result.shares})"
         )
         self.status_var.set(f"Checked {checked}/{total}: {result.reason}")
 

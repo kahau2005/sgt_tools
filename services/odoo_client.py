@@ -61,6 +61,9 @@ class PublishHistory:
     status: str
     detail: str
     error_message: str
+    interaction_count: int = 0
+    comment_count: int = 0
+    share_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -174,6 +177,9 @@ class OdooClient:
             "status",
             "detail",
             "error_message",
+            "interaction_count",
+            "comment_count",
+            "share_count",
         ]
         # Avoid requesting the complete history in one XML-RPC response.
         # Large responses can be closed by the server/proxy before the client
@@ -263,6 +269,35 @@ class OdooClient:
         for (status, detail), history_ids in grouped.items():
             values = {"status": status, "detail": detail or False}
             self._execute_write("sgt.social.publish.history", history_ids, values)
+
+    def batch_update_publish_history_full(self, updates: list[dict]):
+        """Update status, detail, and engagement metrics for history records in batch."""
+        if not updates:
+            return []
+        proxy = self._object_proxy()
+        try:
+            return proxy.execute_kw(
+                self.database,
+                self.credentials.uid,
+                self.credentials.password,
+                "sgt.social.publish.history",
+                "write_check_results_batch",
+                [updates],
+            )
+        except Fault as error:
+            if "write_check_results_batch" not in str(error):
+                raise
+            # Fallback for older Odoo server instances without the custom method
+            updated_ids = []
+            for item in updates:
+                history_id = item.get("id")
+                if not history_id:
+                    continue
+                vals = {k: v for k, v in item.items() if k != "id" and v is not None}
+                if vals:
+                    self._execute_write("sgt.social.publish.history", [history_id], vals)
+                    updated_ids.append(history_id)
+            return updated_ids
 
     def update_group_link_status(self, group_link_id: int, status: str):
         if status not in {"available", "unavailable"}:
@@ -438,6 +473,9 @@ def _history_from_odoo(record: dict) -> PublishHistory:
         status=record.get("status") or "",
         detail=record.get("detail") or "",
         error_message=record.get("error_message") or "",
+        interaction_count=int(record.get("interaction_count") or 0),
+        comment_count=int(record.get("comment_count") or 0),
+        share_count=int(record.get("share_count") or 0),
     )
 
 

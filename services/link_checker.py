@@ -24,10 +24,21 @@ BLOCKED_PHRASES = (
 
 
 class LinkCheckResult:
-    def __init__(self, result: str, reason: str, reload_count: int = 0):
+    def __init__(
+        self,
+        result: str,
+        reason: str,
+        reload_count: int = 0,
+        interactions: int = 0,
+        comments: int = 0,
+        shares: int = 0,
+    ):
         self.result = result
         self.reason = reason
         self.reload_count = reload_count
+        self.interactions = interactions
+        self.comments = comments
+        self.shares = shares
 
 
 class GroupCheckResult:
@@ -437,19 +448,26 @@ class LibreWolfChecker:
                 return LinkCheckResult("dead", "BI_CHAN_HOAC_DA_XOA")
             if any(part in current_url for part in ("/login", "checkpoint", "recover")):
                 return LinkCheckResult("error", "SESSION_LOGIN_CHECKPOINT")
-            state = self._inspect_post(post_id, body_text)
+            state, interactions, comments, shares = self._inspect_post(post_id, body_text)
             if state == "blocked":
                 return LinkCheckResult("dead", "BI_CHAN_HOAC_DA_XOA")
             if state == "alive":
-                return LinkCheckResult("alive", "OK")
+                return LinkCheckResult(
+                    "alive",
+                    "OK",
+                    reload_count=reload_count,
+                    interactions=interactions,
+                    comments=comments,
+                    shares=shares,
+                )
             time.sleep(0.5)
 
         return LinkCheckResult("error", "TIMEOUT_KHONG_XAC_DINH", reload_count)
 
-    def _inspect_post(self, post_id: str, body_text: str) -> str:
-        """Confirm the post URL and meaningful rendered page content."""
+    def _inspect_post(self, post_id: str, body_text: str) -> tuple[str, int, int, int]:
+        """Confirm the post URL and extract meaningful rendered page content & engagement metrics."""
         try:
-            state = self.driver.execute_script(
+            res = self.driver.execute_script(
                 """
                 const postId = String(arguments[0] || '').toLowerCase();
                 const bodyText = String(arguments[1] || '').trim();
@@ -499,14 +517,65 @@ class LibreWolfChecker:
                 const currentUrl = String(location.href || '').toLowerCase();
                 const onPostUrl = currentUrl.includes(postId) || currentUrl.includes('/posts/');
                 const meaningfulBody = bodyText.length >= 180;
-                return onPostUrl && (hasPost || meaningfulBody) ? 'alive' : 'waiting';
+                const isAlive = onPostUrl && (hasPost || meaningfulBody);
+
+                let rawInteractions = '';
+                let rawComments = '';
+                let rawShares = '';
+
+                if (isAlive) {
+                    for (const root of roots) {
+                        const candidateElements = Array.from(root.querySelectorAll(
+                            'span, div, a, button, [role="button"], [role="toolbar"]'
+                        ));
+                        for (const el of candidateElements) {
+                            const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                            const text = (el.innerText || '').trim();
+                            const combined = (ariaLabel + ' ' + text).toLowerCase();
+
+                            if (!rawComments) {
+                                const m = combined.match(/([\\d.,]+(?:\\s*[km])?)\\s*(?:bình luận|câu trả lời|comments?|replies)/i);
+                                if (m) rawComments = m[1];
+                            }
+                            if (!rawShares) {
+                                const m = combined.match(/([\\d.,]+(?:\\s*[km])?)\\s*(?:lượt chia sẻ|chia sẻ|shares?)/i);
+                                if (m) rawShares = m[1];
+                            }
+                            if (!rawInteractions) {
+                                const m = combined.match(/([\\d.,]+(?:\\s*[km])?)\\s*(?:người khác|người|lượt thích|cảm xúc|reactions?|likes?)/i);
+                                if (m) {
+                                    rawInteractions = m[1];
+                                } else if (
+                                    (combined.includes('cảm xúc') || combined.includes('reaction') || combined.includes('thích') || combined.includes('like')) &&
+                                    /^[\\d.,]+\\s*[km]?$/i.test(text)
+                                ) {
+                                    rawInteractions = text;
+                                }
+                            }
+                        }
+                        if (rawInteractions || rawComments || rawShares) break;
+                    }
+                }
+
+                return {
+                    state: isAlive ? 'alive' : 'waiting',
+                    rawInteractions: rawInteractions || '',
+                    rawComments: rawComments || '',
+                    rawShares: rawShares || ''
+                };
                 """,
                 post_id,
                 body_text,
             )
-            return state or "waiting"
+            if not isinstance(res, dict):
+                return "waiting", 0, 0, 0
+            state = res.get("state") or "waiting"
+            interactions = _parse_engagement_metric(res.get("rawInteractions"))
+            comments = _parse_engagement_metric(res.get("rawComments"))
+            shares = _parse_engagement_metric(res.get("rawShares"))
+            return state, interactions, comments, shares
         except Exception:
-            return "waiting"
+            return "waiting", 0, 0, 0
 
 
 _PATH_PATTERNS = (
@@ -554,6 +623,30 @@ def _parse_member_count(value: str) -> int | None:
         return int(float(text.replace(",", ".")) * multiplier)
     except ValueError:
         return None
+
+
+def _parse_engagement_metric(value) -> int:
+    """Parse Facebook engagement counts (e.g. '12', '1.2K', '3,5M') into non-negative integers."""
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    text = str(value).strip().replace(" ", "")
+    if not text:
+        return 0
+    multiplier = 1
+    if text.casefold().endswith("k"):
+        multiplier, text = 1000, text[:-1]
+    elif text.casefold().endswith("m"):
+        multiplier, text = 1000000, text[:-1]
+    if multiplier > 1:
+        text = text.replace(",", ".")
+    else:
+        text = text.replace(",", "")
+    try:
+        return max(0, int(float(text) * multiplier))
+    except (ValueError, TypeError):
+        return 0
 
 
 def _normalize_group_type(value: str) -> str:
