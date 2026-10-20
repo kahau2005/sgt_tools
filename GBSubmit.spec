@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['C:/HAU/Internship/Task/Sub_Check/Sub_Check/main.py'],
-    pathex=['C:/HAU/Internship/Task/Sub_Check/Sub_Check'],
+    ['C:/HAU/Internship/Task/sgt_tools/main.py'],
+    pathex=['C:/HAU/Internship/Task/sgt_tools'],
     binaries=[],
-    datas=[('C:/HAU/Internship/Task/Sub_Check/Sub_Check/geckodriver.exe', '.')],
+    datas=[('C:/HAU/Internship/Task/sgt_tools/geckodriver.exe', '.')],
     hiddenimports=['selenium.webdriver.firefox.webdriver', 'selenium.webdriver.firefox.options', 'selenium.webdriver.firefox.service'],
     hookspath=[],
     hooksconfig={},
